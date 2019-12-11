@@ -135,7 +135,7 @@ pub async fn run_manual_seal<B, CB, E, A, C, S, H>(
 		E: Environment<B> + 'static,
 		E::Error: std::fmt::Display,
 		<E::Proposer as Proposer<B>>::Error: std::fmt::Display,
-		A: txpool::ChainApi<Block = B, Hash = <B as BlockT>::Hash> + 'static,
+		A: txpool::ChainApi<Block=B, Hash=<B as BlockT>::Hash> + 'static,
 		S: Stream<Item=EngineCommand<<B as BlockT>::Hash>> + Unpin + 'static,
 		C: SelectChain<B> + 'static,
 {
@@ -149,7 +149,8 @@ pub async fn run_manual_seal<B, CB, E, A, C, S, H>(
 				sender
 			} => {
 				if pool.status().ready == 0 && !create_empty {
-					return rpc::send_result(sender, Err(Error::EmptyTransactionPool));
+					rpc::send_result(sender, Err(Error::EmptyTransactionPool));
+					continue
 				}
 
 				// get the header to build this new block on.
@@ -170,20 +171,25 @@ pub async fn run_manual_seal<B, CB, E, A, C, S, H>(
 				};
 
 				let header = match header {
-					Err(e) => return rpc::send_result(sender, Err(e)),
+					Err(e) => {
+						rpc::send_result(sender, Err(e));
+						continue
+					}
 					Ok(hash) => hash,
 				};
 
 				let mut proposer = match env.init(&header) {
 					Err(err) => {
-						return rpc::send_result(sender, Err(Error::ProposerError(format!("{}", err))));
+						rpc::send_result(sender, Err(Error::ProposerError(format!("{}", err))));
+						continue
 					}
 					Ok(p) => p,
 				};
 
 				let id = match inherent_data_providers.create_inherent_data() {
 					Err(err) => {
-						return rpc::send_result(sender, Err(err.into()));
+						rpc::send_result(sender, Err(err.into()));
+						continue
 					}
 					Ok(id) => id,
 				};
@@ -210,12 +216,13 @@ pub async fn run_manual_seal<B, CB, E, A, C, S, H>(
 							import_existing: false,
 						}
 					}
-					Err(err) => return rpc::send_result(sender, Err(Error::ProposerError(format!("{}", err))))
+					Err(err) => {
+						rpc::send_result(sender, Err(Error::ProposerError(format!("{}", err))));
+						continue
+					}
 				};
 
-				let result = block_import
-					.import_block(params, HashMap::new());
-
+				let result = block_import.import_block(params, HashMap::new());
 				match result {
 					Ok(ImportResult::Imported(aux)) => {
 						rpc::send_result(sender, Ok(aux))
@@ -253,7 +260,7 @@ pub async fn run_instant_seal<B, CB, H, E, A, C>(
 	inherent_data_providers: inherents::InherentDataProviders,
 )
 	where
-		A: txpool::ChainApi<Block = B, Hash = <B as BlockT>::Hash> + 'static,
+		A: txpool::ChainApi<Block=B, Hash=<B as BlockT>::Hash> + 'static,
 		B: BlockT + 'static,
 		CB: ClientBackend<B, H> + 'static,
 		E: Environment<B> + 'static,
@@ -272,8 +279,9 @@ pub async fn run_instant_seal<B, CB, H, E, A, C>(
 				sender: None,
 			}
 		});
+	println!("running instant seal!");
 
-	run_manual_seal(
+	rurun_manual_sealn_manual_seal(
 		block_import,
 		env,
 		back_end,
@@ -291,7 +299,7 @@ mod tests {
 	use transaction_pool::{
 		BasicPool,
 		txpool::Options,
-		test_helpers::*
+		test_helpers::*,
 	};
 	use txpool_api::TransactionPool;
 	use client::LongestChain;
@@ -309,7 +317,7 @@ mod tests {
 		let pool = Arc::new(BasicPool::new(Options::default(), TestApi::default()));
 		let env = ProposerFactory {
 			transaction_pool: pool.clone(),
-			client: client.clone()
+			client: client.clone(),
 		};
 
 		let future = run_instant_seal(
