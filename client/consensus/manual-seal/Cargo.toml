@@ -38,9 +38,10 @@ consensus-common = { package = "sp-consensus", path = "../../../primitives/conse
 slots = { package = "sc-consensus-slots", path = "../../consensus/slots"  }
 sp-runtime = {  path = "../../../primitives/sr-primitives" }
 fork-tree = { path = "../../../utils/fork-tree" }
-transaction-pool = { package = "sc-transaction-pool", path = "../../transaction-pool" }
+transaction-pool = { package = "sc-transaction-pool", path = "../../transaction-pool", features = ["test"] }
 txpool-api = { package = "sp-transaction-pool-api", path = "../../../primitives/transaction-pool" }
-
+serde = { version = "1.0", features=["derive"] }
+primitives = { package = "sp-core",  path = "../../../primitives/core" }
 
 [dev-dependencies]
 keyring = { package = "sp-keyring", path = "../../../primitives/keyring" }

@@ -22,3 +22,6 @@ test-client = { package = "substrate-test-runtime-client", path = "../../test/ut
 
 [dev-dependencies]
 keyring = { package = "sp-keyring", path = "../../primitives/keyring" }
+
+[features]
+test = []

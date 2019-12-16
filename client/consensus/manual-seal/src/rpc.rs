@@ -22,6 +22,7 @@ use futures::channel::{
 	mpsc::{self, TrySendError},
 	oneshot,
 };
+use serde::{Deserialize, Serialize};
 use futures::TryFutureExt;
 
 type FutureResult<T> = Box<dyn jsonrpc_core::futures::Future<Item = T, Error = Error> + Send>;
@@ -36,7 +37,7 @@ pub enum EngineCommand<Hash> {
 	SealNewBlock {
 		create_empty: bool,
 		parent_hash: Option<Hash>,
-		sender: Sender<ImportedAux>,
+		sender: Sender<CreatedBlock<Hash>>,
 	},
 	/// Tells the engine to finalize the block with the supplied hash
 	FinalizeBlock {
@@ -53,7 +54,7 @@ pub trait ManualSealApi<Hash> {
 		&self,
 		create_empty: bool,
 		parent_hash: Option<Hash>
-	) -> FutureResult<ImportedAux>;
+	) -> FutureResult<CreatedBlock<Hash>>;
 
 	/// Instructs the manual-seal background task to finalize a block
 	#[rpc(name = "engine_finalizeBlock")]
@@ -68,6 +69,13 @@ pub struct ManualSeal<Hash> {
 	import_block_channel: mpsc::UnboundedSender<EngineCommand<Hash>>,
 }
 
+/// return type of `engine_createBlock`
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CreatedBlock<Hash> {
+	pub hash: Hash,
+	pub aux: ImportedAux
+}
+
 impl<Hash> ManualSeal<Hash> {
 	/// Create new `ManualSeal` with the given reference to the client.
 	pub fn new(import_block_channel: mpsc::UnboundedSender<EngineCommand<Hash>>) -> Self {
@@ -80,7 +88,7 @@ impl<Hash: Send + 'static> ManualSealApi<Hash> for ManualSeal<Hash> {
 		&self,
 		create_empty: bool,
 		parent_hash: Option<Hash>
-	) -> FutureResult<ImportedAux> {
+	) -> FutureResult<CreatedBlock<Hash>> {
 		let (sender, receiver) = oneshot::channel();
 		let result = self.import_block_channel.unbounded_send(
 			EngineCommand::SealNewBlock {
@@ -96,7 +104,7 @@ impl<Hash: Send + 'static> ManualSealApi<Hash> for ManualSeal<Hash> {
 
 			match receiver.await {
 				// all good
-				Ok(Ok(aux)) => Ok(aux),
+				Ok(Ok(block)) => Ok(block),
 				// error from the authorship task
 				Ok(Err(e)) => {
 					Err(Error {

@@ -25,6 +25,7 @@ mod maintainer;
 pub mod error;
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "test")]
 pub mod test_helpers;
 
 pub use txpool;

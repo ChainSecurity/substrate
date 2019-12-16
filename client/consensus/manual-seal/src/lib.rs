@@ -29,7 +29,7 @@ use consensus_common::{
 	},
 };
 use sp_runtime::{
-	traits::Block as BlockT,
+	traits::{Block as BlockT, Header as HeaderT},
 	generic::BlockId,
 	Justification,
 };
@@ -38,7 +38,7 @@ use client_api::backend::Backend as ClientBackend;
 use futures::prelude::*;
 use hash_db::Hasher;
 use transaction_pool::{BasicPool, txpool};
-
+use primitives::H256;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,7 +47,7 @@ pub mod rpc;
 mod error;
 
 pub use error::Error;
-pub use rpc::EngineCommand;
+pub use rpc::{EngineCommand, CreatedBlock};
 
 /// The synchronous block-import worker of the engine.
 pub struct ManualSealBlockImport<I> {
@@ -175,7 +175,7 @@ pub async fn run_manual_seal<B, CB, E, A, C, S, H>(
 						rpc::send_result(sender, Err(e));
 						continue
 					}
-					Ok(hash) => hash,
+					Ok(h) => h,
 				};
 
 				let mut proposer = match env.init(&header) {
@@ -200,32 +200,30 @@ pub async fn run_manual_seal<B, CB, E, A, C, S, H>(
 					Duration::from_secs(5),
 				).await;
 
-				let params = match result {
+				let (params, header) = match result {
 					Ok(block) => {
 						let (header, body) = block.deconstruct();
-						BlockImportParams {
+						(BlockImportParams {
 							origin: BlockOrigin::Own,
-							header,
+							header: header.clone(),
 							justification: None,
 							post_digests: Vec::new(),
 							body: Some(body),
-							finalized: true,
+							finalized: false,
 							auxiliary: Vec::new(),
 							fork_choice: ForkChoiceStrategy::LongestChain,
 							allow_missing_state: false,
 							import_existing: false,
-						}
+						}, header)
 					}
 					Err(err) => {
 						rpc::send_result(sender, Err(Error::ProposerError(format!("{}", err))));
 						continue
 					}
 				};
-
-				let result = block_import.import_block(params, HashMap::new());
-				match result {
+				match block_import.import_block(params, HashMap::new()) {
 					Ok(ImportResult::Imported(aux)) => {
-						rpc::send_result(sender, Ok(aux))
+						rpc::send_result(sender, Ok(CreatedBlock { hash: <B as BlockT>::Header::hash(&header), aux }))
 					}
 					Ok(other) => rpc::send_result(sender, Err(other.into())),
 					Err(e) => {
@@ -279,9 +277,8 @@ pub async fn run_instant_seal<B, CB, H, E, A, C>(
 				sender: None,
 			}
 		});
-	println!("running instant seal!");
 
-	rurun_manual_sealn_manual_seal(
+	run_manual_seal(
 		block_import,
 		env,
 		back_end,
@@ -301,6 +298,8 @@ mod tests {
 		txpool::Options,
 		test_helpers::*,
 	};
+	use std::str::FromStr;
+	use consensus_common::ImportedAux;
 	use txpool_api::TransactionPool;
 	use client::LongestChain;
 	use inherents::InherentDataProviders;
@@ -319,22 +318,122 @@ mod tests {
 			transaction_pool: pool.clone(),
 			client: client.clone(),
 		};
-
-		let future = run_instant_seal(
+		// this test checks that blocks are created as soon as transactions are imported into the pool.
+		let (sender, receiver) = futures::channel::oneshot::channel();
+		let mut sender = Arc::new(Some(sender));
+		let stream = pool.pool().import_notification_stream()
+			.map(move |_| {
+				// we're only going to submit one tx so this fn will only be called once.
+				let mut_sender =  Arc::get_mut(&mut sender).unwrap();
+				let sender = std::mem::replace(mut_sender, None);
+				EngineCommand::SealNewBlock {
+					create_empty: false,
+					parent_hash: None,
+					sender
+				}
+			});
+		let future = run_manual_seal(
 			Box::new(client.clone()),
 			env,
 			backend.clone(),
 			pool.clone(),
+			stream,
 			select_chain,
 			inherent_data_providers,
 		);
-		// spawn the background authorship task
-		tokio::spawn(future);
-
-		// submit transactions to pool.
-		let result = pool.submit_one(&BlockId::Number(1), uxt(Alice, 209)).await;
-		println!("import result: {:?}", result);
+		std::thread::spawn(|| {
+			let mut rt = tokio::runtime::Runtime::new().unwrap();
+			// spawn the background authorship task
+			rt.block_on(future);
+		});
+		// submit a transaction to pool.
+		let result = pool.submit_one(&BlockId::Number(0), uxt(Alice, 209)).await;
+		// assert that it was successfully imported
 		assert!(result.is_ok());
-		println!("{:?}", backend.blockchain().header(BlockId::Number(1)))
+		// assert that the background task returns ok
+		let created_block = rx.await.unwrap().unwrap();
+		assert_eq!(
+			created_block,
+			CreatedBlock {
+				hash: H256::from_str("5773e6155f1040b9b5b901cf90556e882f4eeecf9884b697427d3763eed16b1b").unwrap(),
+				aux: ImportedAux {
+					header_only: false,
+					clear_justification_requests: false,
+					needs_justification: false,
+					bad_justification: false,
+					needs_finality_proof: false,
+					is_new_best: true
+				}
+			}
+		);
+		// assert that there's a new block in the db.
+		assert!(backend.blockchain().header(BlockId::Number(1)).unwrap().is_some())
 	}
+
+	#[tokio::test]
+	async fn manual_seal_and_finalization() {
+		let builder = test_client::TestClientBuilder::new();
+		let backend = builder.backend();
+		let client = Arc::new(builder.build());
+		let select_chain = LongestChain::new(backend.clone());
+		let inherent_data_providers = InherentDataProviders::new();
+		let pool = Arc::new(BasicPool::new(Options::default(), TestApi::default()));
+		let env = ProposerFactory {
+			transaction_pool: pool.clone(),
+			client: client.clone(),
+		};
+		// this test checks that blocks are created as soon as an engine command is sent over the stream.
+		let (sink, stream) = futures::channel::mpsc::unbounded();
+		let future = run_manual_seal(
+			Box::new(client.clone()),
+			env,
+			backend.clone(),
+			pool.clone(),
+			stream,
+			select_chain,
+			inherent_data_providers,
+		);
+		std::thread::spawn(|| {
+			let mut rt = tokio::runtime::Runtime::new().unwrap();
+			// spawn the background authorship task
+			rt.block_on(future);
+		});
+		// submit a transaction to pool.
+		let result = pool.submit_one(&BlockId::Number(0), uxt(Alice, 209)).await;
+		// assert that it was successfully imported
+		assert!(result.is_ok());
+		let (tx, rx) = futures::channel::oneshot::channel();
+		sink.unbounded_send(EngineCommand::SealNewBlock {
+			parent_hash: None,
+			sender: Some(tx),
+			create_empty: false,
+		}).unwrap();
+		let created_block = rx.await.unwrap().unwrap();
+
+		// assert that the background task returns ok
+		assert_eq!(
+			created_block,
+			CreatedBlock {
+				hash: H256::from_str("5773e6155f1040b9b5b901cf90556e882f4eeecf9884b697427d3763eed16b1b").unwrap(),
+				aux: ImportedAux {
+					header_only: false,
+					clear_justification_requests: false,
+					needs_justification: false,
+					bad_justification: false,
+					needs_finality_proof: false,
+					is_new_best: true
+				}
+			}
+		);
+		// assert that there's a new block in the db.
+		let header = backend.blockchain().header(BlockId::Number(1)).unwrap().unwrap();
+		let (tx, rx) = futures::channel::oneshot::channel();
+		sink.unbounded_send(EngineCommand::FinalizeBlock {
+			sender: Some(tx),
+			hash: header.hash()
+		}).unwrap();
+		// assert that the background task returns ok
+		assert_eq!(rx.await.unwrap().unwrap(), ());
+	}
+	// TODO: test with fork blocks
 }
